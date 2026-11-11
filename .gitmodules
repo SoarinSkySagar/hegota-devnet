@@ -1,0 +1,6 @@
+[submodule "dora"]
+	path = dora
+	url = https://github.com/ethpandaops/dora
+[submodule "skandha"]
+	path = skandha
+	url = https://github.com/forshtat/mempool-workshop-sidecar
