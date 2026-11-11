@@ -503,7 +503,10 @@ cmd_frame_tx() {
     [[ -n "$sk" ]] || die "alt mempool sidecar is not running"
     args+=(--format legacy --sidecar "$sk")
   fi
-  node "$SCRIPT_DIR/tools/send-frame-tx.mjs" --rpc "$rpc" --demo "${1:-transfer}" "${args[@]+"${args[@]}"}" "${@:2}"
+  # First arg is a demo name unless it is an option (e.g. `frame-tx --frames my.json`).
+  local demo="transfer"
+  if [[ $# -gt 0 && "$1" != --* ]]; then demo="$1"; shift; fi
+  node "$SCRIPT_DIR/tools/send-frame-tx.mjs" --rpc "$rpc" --demo "$demo" "${args[@]+"${args[@]}"}" "$@"
 }
 
 cmd_accounts() {

@@ -51,6 +51,7 @@ The first run pulls several Docker images (ethrex, lighthouse, dora, genesis gen
 ./devnet.sh accounts              # seed phrase + accounts 0-9 with keys and live balances
 ./devnet.sh logs [el|cl|vc|dora|skandha]   # follow service logs (default: el)
 ./devnet.sh frame-tx [transfer|batch|revert] [--verify-gas N]   # send demo frame tx
+./devnet.sh frame-tx --frames my.json [--key 0x…]              # send your own frames
 ./devnet.sh down                  # destroy the chain
 ./devnet.sh dora-build [tag]      # build ./dora -> pq-wallet/dora:local
 ./devnet.sh skandha-build [tag]   # build ./skandha -> pq-wallet/skandha:local
@@ -107,6 +108,40 @@ The two profiles are separate chains, not one chain with a toggle. The sidecar o
   "blobVersionedHashes": [], "recentRootReferences": []
 }
 ```
+
+## Sending your own frame tx
+
+Describe the frames in a JSON file ([examples/frames.json](examples/frames.json)) and send them. The tool fills in chain ID, nonce and fees, signs the sig hash with `--key` (default: account #0), and submits to the EL, or to the sidecar in alt-mempool mode.
+
+```json
+[
+  { "mode": "VERIFY", "flags": 3, "target": null, "gas": 60000 },
+  { "mode": "SENDER", "target": "0xE25583099BA105D9ec0A67f5Ae86D90e50036425", "gas": 50000, "value": "1000000000000000000" },
+  { "mode": "SENDER", "target": "0x614561D2d143621E126e87831AEF287678B442b8", "gas": 50000, "value": "2000000000000000000", "data": "0xcafe" }
+]
+```
+
+```bash
+./devnet.sh frame-tx --frames examples/frames.json --key 0x<privateKey from funded.json>
+./devnet.sh frame-tx --frames my.json --dry-run     # print the signed raw tx, don't send
+```
+
+| Field | Meaning |
+|---|---|
+| `mode` | `VERIFY`, `SENDER`, `DEFAULT`, `ASSERT` (or 0–3) |
+| `flags` | default 0; `VERIFY` approving the sender uses 3 (execution + payment) |
+| `target` | address, or `null` = tx.sender |
+| `gas` | execution gas limit (required) |
+| `stateGas` | EIP-8037 state gas; default 600000 (non-VERIFY), 0 (VERIFY) |
+| `value` | wei, decimal string; only `SENDER` frames may carry value |
+| `data` | hex calldata, default `0x` |
+
+- A plain EOA sender must start with `{"mode":"VERIFY","flags":3,"target":null}`. Its default code checks the SECP256K1 signature the tool adds.
+- Contract call: `SENDER` frame with `target` = contract and `data` = ABI calldata (e.g. `cast calldata "transfer(address,uint256)" 0x… 1`).
+- Smart-account / PQ sender: the VERIFY frame targets your account contract, which must `APPROVE`. A PQ signature goes in as an `ARBITRARY` (scheme 0) signature. The tool only signs SECP256K1, so use [send-frame-tx.mjs](tools/send-frame-tx.mjs) as the template for building and encoding those txs in your wallet code.
+- MetaMask cannot send frame txs (no wallet supports type `0x06` yet). Use it for funding and regular txs only.
+
+Direct use (no `devnet.sh`): `node tools/send-frame-tx.mjs --rpc <EL RPC> --frames my.json --key 0x…`. Add `--format legacy --sidecar <sidecar URL>` for the alt-mempool chain.
 
 ## Frame tx notes (both profiles)
 

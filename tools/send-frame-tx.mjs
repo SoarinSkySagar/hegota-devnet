@@ -24,6 +24,19 @@
 //   node send-frame-tx.mjs [--rpc URL] [--key HEX] [--demo transfer|batch|revert]
 //                          [--format current|legacy] [--sidecar URL] [--dry-run]
 //                          [--verify-gas N]  (VERIFY frame gas; >100000 breaks ERC-8421 BUDGET-010)
+//                          [--frames FILE.json]  (your own frames instead of a demo)
+//
+// --frames file: a JSON array of frames, in order. Fields:
+//   mode      "VERIFY" | "SENDER" | "DEFAULT" | "ASSERT" (or 0-3)
+//   flags     number, default 0 (VERIFY approving the sender: 3 = execution + payment)
+//   target    address, or null for tx.sender
+//   gas       execution gas limit
+//   stateGas  EIP-8037 state gas limit (default 600000 for non-VERIFY frames, 0 for VERIFY)
+//   value     wei, as a decimal string (only SENDER frames may carry value)
+//   data      hex calldata, default "0x"
+// The tx is signed with --key (SECP256K1 over the sig hash), so a plain EOA sender
+// needs a VERIFY frame with target null and flags 3 first.
+import { readFileSync } from "node:fs";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { keccak_256 } from "@noble/hashes/sha3";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
@@ -100,7 +113,29 @@ const ONE_GWEI = 10n ** 9n;
 // state-gas budget, so SENDER/DEFAULT frames that may touch new state get one.
 const STATE_GAS = 600_000n;
 
+const MODE_NAMES = { DEFAULT: 0, VERIFY: 1, SENDER: 2, ASSERT: 3 };
+function fileFrames(path) {
+  const list = JSON.parse(readFileSync(path, "utf8"));
+  if (!Array.isArray(list) || list.length === 0) throw new Error(`${path}: expected a non-empty JSON array of frames`);
+  return list.map((f, i) => {
+    const mode = typeof f.mode === "string" ? MODE_NAMES[f.mode.toUpperCase()] : Number(f.mode);
+    if (mode === undefined || Number.isNaN(mode)) throw new Error(`${path}: frame ${i} has unknown mode ${f.mode}`);
+    if (f.gas === undefined) throw new Error(`${path}: frame ${i} needs "gas"`);
+    const frame = {
+      mode,
+      flags: Number(f.flags ?? 0),
+      target: f.target ?? null,
+      gas: BigInt(f.gas),
+      value: BigInt(f.value ?? 0),
+      data: f.data ?? "0x",
+    };
+    if (f.stateGas !== undefined) frame.stateGas = BigInt(f.stateGas);
+    return frame;
+  });
+}
+
 function demoFrames() {
+  if (typeof args.frames === "string") return fileFrames(args.frames);
   const verify = { mode: MODE.VERIFY, flags: 0x3, target: null, gas: BigInt(args["verify-gas"] ?? 60_000), value: 0n, data: "0x" };
   switch (DEMO) {
     case "transfer":
@@ -187,7 +222,7 @@ const raw = hex(encode(tx, [{ scheme: 1, signer: null, msg: new Uint8Array(), si
 
 console.log(`rpc      ${RPC}`);
 console.log(`sender   ${sender}  nonce ${nonce}`);
-console.log(`demo     ${DEMO} (${frames.length} frames)`);
+console.log(`frames   ${typeof args.frames === "string" ? args.frames : `demo ${DEMO}`} (${frames.length} frames)`);
 console.log(`sig_hash ${hex(sigHash)}`);
 
 if (!SIDECAR) {

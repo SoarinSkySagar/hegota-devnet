@@ -1,0 +1,5 @@
+[
+  { "mode": "VERIFY", "flags": 3, "target": null, "gas": 60000 },
+  { "mode": "SENDER", "target": "0xE25583099BA105D9ec0A67f5Ae86D90e50036425", "gas": 50000, "value": "1000000000000000000" },
+  { "mode": "SENDER", "target": "0x614561D2d143621E126e87831AEF287678B442b8", "gas": 50000, "value": "2000000000000000000", "data": "0xcafe" }
+]
