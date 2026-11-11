@@ -25,6 +25,22 @@
 //                          [--format current|legacy] [--sidecar URL] [--dry-run]
 //                          [--verify-gas N]  (VERIFY frame gas; >100000 breaks ERC-8421 BUDGET-010)
 //                          [--frames FILE.json]  (your own frames instead of a demo)
+//                          [--sponsor-key HEX]   (another account pays the gas)
+//                          [--nonce N] [--nonce-key K] [--no-wait]
+//
+// --sponsor-key: gas sponsorship. The validation prefix becomes
+//   [VERIFY target=null flags=2 (sender approves execution),
+//    VERIFY target=sponsor flags=1 (sponsor approves payment)]
+// and signatures = [sender SECP256K1 (signer empty), sponsor SECP256K1 (signer = sponsor)],
+// both over the same sig hash. With --frames, write those two VERIFY frames yourself.
+// ethrex's public mempool holds at most one pending tx per sponsor.
+// --nonce: explicit nonce / sequence.
+// --nonce-key K: EIP-8250 keyed nonce. Each key is an independent lane (sequence
+// starts at 0, use --nonce for later ones), so one sender can have several txs
+// pending at once. ethrex's public mempool simulates against head state, so
+// queuing account-nonce n+1 behind a pending n is rejected; use distinct keys.
+// The payment-approving VERIFY frame gets 200k state gas (new keyed-nonce slot).
+// --no-wait: print the hash and exit instead of waiting for the receipt.
 //
 // --frames file: a JSON array of frames, in order. Fields:
 //   mode      "VERIFY" | "SENDER" | "DEFAULT" | "ASSERT" (or 0-3)
@@ -53,6 +69,8 @@ const KEY = (args.key || process.env.PRIVATE_KEY || "bcdf20249abf0ed6d944c0288fa
 const DEMO = args.demo || "transfer";
 const LEGACY = args.format === "legacy";
 const SIDECAR = typeof args.sidecar === "string" ? args.sidecar : null;
+const NONCE_KEY = args["nonce-key"] !== undefined && args["nonce-key"] !== true ? BigInt(args["nonce-key"]) : null;
+const SPONSOR_KEY = typeof args["sponsor-key"] === "string" ? args["sponsor-key"].replace(/^0x/, "") : null;
 
 // ---------- minimal RLP ----------
 const concat = (...arrs) => {
@@ -104,6 +122,8 @@ const MODE = { DEFAULT: 0, VERIFY: 1, SENDER: 2 };
 const priv = hexToBytes(KEY);
 const pub = secp256k1.getPublicKey(priv, false).slice(1);
 const sender = "0x" + bytesToHex(keccak_256(pub).slice(-20));
+const toAddress = (k) => "0x" + bytesToHex(keccak_256(secp256k1.getPublicKey(hexToBytes(k), false).slice(1)).slice(-20));
+const sponsor = SPONSOR_KEY ? toAddress(SPONSOR_KEY) : null;
 
 const ALICE = "0x000000000000000000000000000000000000a11c";
 const BOB = "0x0000000000000000000000000000000000000b0b";
@@ -136,13 +156,26 @@ function fileFrames(path) {
 
 function demoFrames() {
   if (typeof args.frames === "string") return fileFrames(args.frames);
-  const verify = { mode: MODE.VERIFY, flags: 0x3, target: null, gas: BigInt(args["verify-gas"] ?? 60_000), value: 0n, data: "0x" };
+  // The public mempool caps the whole validation prefix (VERIFY frames + 2800 per
+  // SECP256K1 signature) at MAX_VERIFY_GAS = 100000, so sponsored txs get 30k each.
+  const vgas = BigInt(args["verify-gas"] ?? (sponsor ? 30_000 : 60_000));
+  const prefix = sponsor
+    ? [
+        { mode: MODE.VERIFY, flags: 0x2, target: null, gas: vgas, value: 0n, data: "0x" },    // sender: execution
+        { mode: MODE.VERIFY, flags: 0x1, target: sponsor, gas: vgas, value: 0n, data: "0x" }, // sponsor: payment
+      ]
+    : [{ mode: MODE.VERIFY, flags: 0x3, target: null, gas: vgas, value: 0n, data: "0x" }];
+  // Payment APPROVE writes the new keyed-nonce slot; it draws on that frame's state gas.
+  if (NONCE_KEY !== null) prefix[prefix.length - 1].stateGas = 200_000n;
+  return [...prefix, ...demoBody()];
+}
+
+function demoBody() {
   switch (DEMO) {
     case "transfer":
-      return [verify, { mode: MODE.SENDER, flags: 0, target: ALICE, gas: 50_000n, value: 10n ** 15n, data: "0x" }];
+      return [{ mode: MODE.SENDER, flags: 0, target: ALICE, gas: 50_000n, value: 10n ** 15n, data: "0x" }];
     case "batch":
       return [
-        verify,
         { mode: MODE.SENDER, flags: 0, target: ALICE, gas: 50_000n, value: 10n ** 15n, data: "0x" },
         { mode: MODE.SENDER, flags: 0, target: BOB, gas: 50_000n, value: 2n * 10n ** 15n, data: "0xdeadbeef" },
         { mode: MODE.DEFAULT, flags: 0, target: BOB, gas: 30_000n, value: 0n, data: "0x1234" },
@@ -151,7 +184,6 @@ function demoFrames() {
       // SENDER frame that runs out of gas on a precompile call (ecrecover needs 3000),
       // so it fails while the tx itself stays valid.
       return [
-        verify,
         { mode: MODE.SENDER, flags: 0, target: ALICE, gas: 50_000n, value: 10n ** 15n, data: "0x" },
         { mode: MODE.SENDER, flags: 0, target: "0x0000000000000000000000000000000000000001", gas: 100n, value: 0n, data: "0x" + "00".repeat(128) },
       ];
@@ -194,7 +226,11 @@ function encode(tx, sigs) {
 }
 
 const chainId = BigInt(await rpc("eth_chainId"));
-const nonce = BigInt(await rpc("eth_getTransactionCount", [sender, "pending"]));
+const nonce = args.nonce !== undefined && args.nonce !== true
+  ? BigInt(args.nonce)
+  : NONCE_KEY !== null
+    ? 0n
+    : BigInt(await rpc("eth_getTransactionCount", [sender, "pending"]));
 const baseFee = BigInt((await rpc("eth_getBlockByNumber", ["latest", false])).baseFeePerGas || "0x1");
 const frames = withStateGas(demoFrames());
 const totalGas = frames.reduce((n, f) => n + f.gas + (f.stateGas ?? 0n), 0n) + 200_000n; // + intrinsic/sig/calldata headroom
@@ -203,7 +239,7 @@ const maxFeePerGas = baseFee * 2n + maxPriority;
 const tx = {
   chainId,
   // current: empty => account nonce. legacy: explicit key 0 => account nonce (EIP-8250).
-  nonceKeys: LEGACY ? [0n] : [],
+  nonceKeys: NONCE_KEY !== null ? [NONCE_KEY] : LEGACY ? [0n] : [],
   nonceSeq: nonce,
   sender,
   frames,
@@ -215,13 +251,20 @@ const tx = {
 // sig_hash: signature bytes replaced by their length (65 for secp256k1) in the
 // current layout, by empty bytes in the legacy one.
 const elided = LEGACY ? new Uint8Array() : intToBytes(65);
-const sigHash = keccak_256(encode(tx, [{ scheme: 1, signer: null, msg: new Uint8Array(), signature: elided }]));
-const sig = secp256k1.sign(sigHash, priv, { lowS: true });
-const vrs = concat(Uint8Array.of(sig.recovery), hexToBytes(sig.r.toString(16).padStart(64, "0")), hexToBytes(sig.s.toString(16).padStart(64, "0")));
-const raw = hex(encode(tx, [{ scheme: 1, signer: null, msg: new Uint8Array(), signature: vrs }]));
+// signatures[0] = sender (signer empty -> tx.sender); signatures[1] = sponsor (explicit signer).
+const signers = [{ key: KEY, signer: null }, ...(sponsor ? [{ key: SPONSOR_KEY, signer: sponsor }] : [])];
+const sigHash = keccak_256(encode(tx, signers.map((s) => ({ scheme: 1, signer: s.signer, msg: new Uint8Array(), signature: elided }))));
+const signVrs = (k) => {
+  const sg = secp256k1.sign(sigHash, hexToBytes(k), { lowS: true });
+  return concat(Uint8Array.of(sg.recovery), hexToBytes(sg.r.toString(16).padStart(64, "0")), hexToBytes(sg.s.toString(16).padStart(64, "0")));
+};
+const sigs = signers.map((s) => ({ scheme: 1, signer: s.signer, msg: new Uint8Array(), signature: signVrs(s.key) }));
+const vrs = sigs[0].signature;
+const raw = hex(encode(tx, sigs));
 
 console.log(`rpc      ${RPC}`);
-console.log(`sender   ${sender}  nonce ${nonce}`);
+console.log(`sender   ${sender}  nonce ${nonce}${NONCE_KEY !== null ? ` (key ${NONCE_KEY})` : ""}`);
+if (sponsor) console.log(`sponsor  ${sponsor}`);
 console.log(`frames   ${typeof args.frames === "string" ? args.frames : `demo ${DEMO}`} (${frames.length} frames)`);
 console.log(`sig_hash ${hex(sigHash)}`);
 
@@ -249,7 +292,7 @@ if (SIDECAR) {
       limits: { execution: h(f.gas), state: h(f.stateGas ?? 0n) },
       value: h(f.value), data: f.data || "0x",
     })),
-    signatures: [{ scheme: 1, signer: "0x", msg: "0x", signature: hex(vrs) }],
+    signatures: sigs.map((s) => ({ scheme: 1, signer: s.signer ?? "0x", msg: "0x", signature: hex(s.signature) })),
     fees: { maxPriorityFeePerGas: h(maxPriority), maxFeePerGas: h(maxFeePerGas), maxFeePerBlobGas: "0x0" },
     blobVersionedHashes: [],
     recentRootReferences: [],
@@ -261,6 +304,7 @@ if (SIDECAR) {
   hash = await rpc("eth_sendRawTransaction", [raw]);
 }
 console.log(`tx       ${hash}`);
+if (args["no-wait"]) process.exit(0);
 for (let i = 0; i < 60; i++) {
   const rc = await rpc("eth_getTransactionReceipt", [hash]);
   if (rc) {

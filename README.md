@@ -52,6 +52,8 @@ The first run pulls several Docker images (ethrex, lighthouse, dora, genesis gen
 ./devnet.sh logs [el|cl|vc|dora|skandha]   # follow service logs (default: el)
 ./devnet.sh frame-tx [transfer|batch|revert] [--verify-gas N]   # send demo frame tx
 ./devnet.sh frame-tx --frames my.json [--key 0x…]              # send your own frames
+./devnet.sh frame-tx transfer --sponsor-key 0x…                  # gas paid by another account
+examples/mixed-frame-txs.sh       # 13 mixed txs: self-paid, sponsored, same-sender batches
 ./devnet.sh down                  # destroy the chain
 ./devnet.sh dora-build [tag]      # build ./dora -> pq-wallet/dora:local
 ./devnet.sh skandha-build [tag]   # build ./skandha -> pq-wallet/skandha:local
@@ -142,6 +144,24 @@ Describe the frames in a JSON file ([examples/frames.json](examples/frames.json)
 - MetaMask cannot send frame txs (no wallet supports type `0x06` yet). Use it for funding and regular txs only.
 
 Direct use (no `devnet.sh`): `node tools/send-frame-tx.mjs --rpc <EL RPC> --frames my.json --key 0x…`. Add `--format legacy --sidecar <sidecar URL>` for the alt-mempool chain.
+
+### Sponsorship, nonces, batching
+
+| Option | Effect |
+|---|---|
+| `--sponsor-key 0x…` | Gas sponsorship. Prefix becomes `VERIFY(target null, flags 2)` (sender approves execution) + `VERIFY(target sponsor, flags 1)` (sponsor approves payment). `signatures[1]` is the sponsor's SECP256K1 sig with `signer` = sponsor. Receipt `payer` = sponsor; the sender pays only frame values. |
+| `--nonce N` | Explicit nonce (or sequence, with `--nonce-key`) |
+| `--nonce-key K` | EIP-8250 keyed nonce: independent lane, sequence starts at 0. The payment VERIFY frame gets 200k state gas for the new slot. |
+| `--no-wait` | Print the hash, don't wait for the receipt |
+
+Public mempool limits (default chain, ethrex):
+
+- **1 pending frame tx per sender**, even with different nonce keys or sponsors ("A pending frame transaction from this sender is already in the pool"). Send same-sender txs one after another.
+- **1 pending tx per sponsor** (no canonical paymaster yet).
+- Txs are simulated against head state, so account nonce n+1 can't queue behind a pending n.
+- Validation prefix capped at 100k execution gas (VERIFY frames + 2800 per SECP256K1 sig). Sponsored txs default to 30k per VERIFY frame.
+
+Several pending txs from one sender is what the ERC-8421 alt mempool (`--alt-mempool`) allows (no per-sender cap on keyed nonces).
 
 ## Frame tx notes (both profiles)
 
